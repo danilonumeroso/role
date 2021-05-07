@@ -1,85 +1,136 @@
 import torch
 import fire
-import numpy as np
+import chess
+import chess.pgn
 
-from utils import set_seed
-from torch.nn import functional as F
+from utils import set_seed, create_path
+from utils.features import board_to_feature
 from models.role.agent import Agent
+from pathlib import Path
+from datetime import datetime
 
 
-def main(num_episodes: int = 5000,
-         lr: float = 1e-4,
+def main(num_episodes: int = 20000,
+         len_episode: int = 256,
+         lr: float = 1e-3,
+         momentum: float = 0.9,
          polyak: float = 0.995,
          gamma: float = 0.95,
          discount: float = 0.9,
          replay_buffer_size: int = 10000,
-         batch_size: int = 1,
-         update_interval: int = 1,
-         seed: int = 0):
+         batch_size: int = 256,
+         update_interval: int = 256,
+         num_updates: int = 5,
+         seed: int = 0,
+         save_dir: Path = Path('runs')):
+
+    print(update_interval)
+
+    save_dir = save_dir / datetime.now().isoformat()
+
+    create_path(save_dir)
 
     set_seed(seed)
 
-    num_input = 353
+    num_input = 384
     num_output = 1
 
-    device = torch.device("cpu")
-    agent = Agent(num_input, num_output, device, lr, replay_buffer_size)
+    device = torch.device("cuda")
+    agent = Agent(num_input, num_output, device, lr, momentum, replay_buffer_size)
 
     eps = 0.05
     batch_losses = []
     episode = 0
     it = 0
-    environment = None
+
+    board = chess.Board()
+    game = chess.pgn.Game()
+    moves = []
+
+    expert = chess.engine.SimpleEngine.popen_uci("./stockfish")
+    expert.analyse(board, chess.engine.Limit(time=0.001))['score'].relative
+    white_reward = 0
+    black_reward = 0
+    og_len_episode = len_episode
 
     while episode < num_episodes:
-        valid_actions = list(environment.get_valid_actions())
 
-        # observations = np.vstack(
-        #     [
-        #         np.append(action_encoder(action), steps_left)
-        #         for action in valid_actions
-        #     ]
-        # )
+        if episode < 5000:
+            len_episode = 30
+        elif episode < 10000:
+            len_episode = 60
+        else:
+            len_episode - og_len_episode
 
-        observations = None
+        states = []
+        rewards = []
 
-        observations = torch.as_tensor(observations).float()
-        a = agent.action_step(observations, eps)
-        action = valid_actions[a]
+        legal_moves = list(board.legal_moves)
 
-        result = environment.step(action)
+        for m in legal_moves:
+            color = board.turn
+            board.push(m)
+            states.append(
+                torch.as_tensor(board_to_feature(board)).float()
+            )
+            reward = expert.analyse(board, chess.engine.Limit(time=0.001))['score'].pov(color)
 
-        # action_embedding = np.append(
-        #     action_encoder(action),
-        #     steps_left
-        # )
+            reward = reward.score(mate_score=3000) / 100
 
-        _, out, done = result
+            rewards.append(reward - (white_reward if color else black_reward))
+            board.pop()
+
+        observations = torch.stack(states).float()
+
+        idx = agent.action_step(observations, eps)
+        action = legal_moves[idx]
+        reward = rewards[idx]
+
+        if color:
+            white_reward = reward
+        else:
+            black_reward = reward
+
+        board.push(action)
+        moves.append(action)
+        done = board.is_game_over() or it % len_episode == 0
 
         agent.replay_buffer.push(
-            # torch.as_tensor(action_embedding).float(),
-            # torch.as_tensor(out['reward']).float(),
-            # torch.as_tensor(action_embeddings).float(),
-            float(result.terminated)
+            states[idx],
+            torch.as_tensor(reward).float(),
+            observations,
+            int(done)
         )
 
         if it % update_interval == 0 and len(agent.replay_buffer) >= batch_size:
-            loss = agent.train_step(
-                batch_size,
-                gamma,
-                polyak
-            )
-            loss = loss.item()
-            batch_losses.append(loss)
+
+            errors = []
+            for _ in range(num_updates):
+                loss = agent.train_step(
+                    batch_size,
+                    gamma,
+                    polyak
+                )
+                errors.append(loss.item())
+                batch_losses.append(sum(errors) / len(errors))
+
+            print(f'episode: {episode}, loss:{batch_losses[-1]:.4f}')
 
         it += 1
 
         if done:
+
+            game.add_line(moves)
+            with open(save_dir / f"game_ep{episode}.pgn", "w", encoding="utf-8") as f:
+                exporter = chess.pgn.FileExporter(f)
+                game.accept(exporter)
+
+            board = chess.Board()
+            game = chess.pgn.Game()
+            moves = []
             episode += 1
 
-            # print(f'Episode {episode}> Reward = {out["reward"]:.4f} (pred: {out["reward_pred"]:.4f}, sim: {out["reward_sim"]:.4f})')
-
-            # eps *= 0.9995
+    expert.quit()
 
 
 if __name__ == '__main__':

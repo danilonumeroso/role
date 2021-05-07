@@ -5,8 +5,7 @@ import chess.svg
 
 from models.random_player import RandomPlayer
 
-# A = chess.engine.SimpleEngine.popen_uci("/home/danilo/.local/bin/stockfish")
-# B = chess.engine.SimpleEngine.popen_uci("/home/danilo/.local/bin/stockfish")
+stockfish = chess.engine.SimpleEngine.popen_uci("/home/danilo/.local/bin/stockfish")
 
 A = RandomPlayer()
 B = RandomPlayer()
@@ -19,11 +18,13 @@ node = None
 moves = []
 
 while not board.is_game_over() and len(moves) <= 200:
-    result = A.play(board, chess.engine.Limit(time=0.1))
+    print(stockfish.analyse(board, chess.engine.Limit(time=0.001))['score'].relative)
+    result = stockfish.play(board, chess.engine.Limit(time=0.1))
     board.push(result.move)
     moves.append(result.move)
 
-    result = B.play(board, chess.engine.Limit(time=0.1))
+    result = stockfish.play(board, chess.engine.Limit(time=0.001))
+    print(stockfish.analyse(board, chess.engine.Limit(time=0.1))['score'].relative)
     board.push(result.move)
     moves.append(result.move)
 
@@ -42,9 +43,3 @@ exporter = chess.pgn.FileExporter(pgn)
 game.accept(exporter)
 
 open('game.svg', 'w').write(chess.svg.board(board))
-
-def play(white, black, stopping_conditions=lambda _: True):
-    board = chess.Board()
-    game = chess.pgn.Game()
-    moves = []
-    pass
