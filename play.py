@@ -8,10 +8,11 @@ import torch
 
 from models.role.replay_memory import ReplayMemory
 from utils.features import board_to_feature
+from utils.data import normalize
 
 MATE_SCORE = 3000
 SCORE_REDUCTION = 100
-
+CLAMP_VALUE = 10
 
 def get_next_states(board):
     next_states = []
@@ -29,16 +30,19 @@ def get_next_states(board):
 
 def get_reward(board,
                expert,
+               white_turn,
                previous_reward,
                time_per_move):
     r = expert.analyse(
         board,
         chess.engine.Limit(time=time_per_move)
-    )['score'].pov(board.turn)
+    )['score'].pov(white_turn)
     r = r.score(mate_score=MATE_SCORE) / SCORE_REDUCTION
     r = r - previous_reward
 
-    return r
+    r = min(CLAMP_VALUE, max(r, -CLAMP_VALUE))
+
+    return normalize(r, x_min=-CLAMP_VALUE, x_max=CLAMP_VALUE, range_=(-1, 1))
 
 
 def move(board,
@@ -99,11 +103,16 @@ def play(network,
         m = legal_moves[move_idx]
         board.push(m)
 
-        reward = get_reward(board,
-                            expert,
-                            white_reward if white_turn else black_reward,
-                            time_per_move=time_per_move)
+        if expert_move:
+            reward = 1.0
+        else:
+            reward = get_reward(board,
+                                expert,
+                                white_turn,
+                                white_reward if white_turn else black_reward,
+                                time_per_move=time_per_move)
 
+        assert reward >= -1 and reward <= 1
         if white_turn:
             white_reward = reward
         else:
@@ -125,7 +134,7 @@ def play(network,
             'R': reward,
             'action': str(m),
             'expert_move': expert_move,
-            'random_action': network.policy.random_action,
+            'random_action': network.policy.random_action and not expert_move,
             'color': 'white' if white_turn else 'black'
         })
 
@@ -146,6 +155,7 @@ def play(network,
 def play_contender(network,
                    contender,
                    max_moves=512,
+                   time_per_move=0.001,
                    record_game=True,
                    save_dir=None,
                    game_id=None):
@@ -154,7 +164,7 @@ def play_contender(network,
     game = chess.pgn.Game()
     moves = []
 
-    white, black = network, contender if random.uniform(0,1) >= 0.5 else contender, network
+    white, black = (network, contender) if random.uniform(0, 1) >= 0.5 else (contender, network)
 
     game.headers["Event"] = f"Game {game_id}"
     game.headers["Site"] = "Virtual"
@@ -163,11 +173,9 @@ def play_contender(network,
 
     for i in range(max_moves//2):
 
-        m = white.play(board).move
-        board.push(m)
-        moves.append(m)
+        player = white if board.turn else black
 
-        m = black.play(board).move
+        m = player.play(board, chess.engine.Limit(time=time_per_move)).move
         board.push(m)
         moves.append(m)
 

@@ -1,25 +1,27 @@
 import torch
-from torch.nn import functional as F
 from models.role.dqn import DQN
 from models.policy import DecayingEpsilonGreedy
+from torch.nn import functional as F
 
 
 class DoubleDQN:
     def __init__(self,
                  device,
                  num_features,
-                 batch_size,
-                 discount,
-                 eps_decay,
-                 optimizer_class,
-                 **optimizer_config,
+                 eps_decay=0.99,
+                 eps_start=1.,
+                 eps_end=0.,
+                 polyak_factor=0.99
                  ):
 
         self.device = device
         self.num_input = num_features
-        self.policy = DecayingEpsilonGreedy(eps_decay)
-        self.batch_size = batch_size
-        self.discount = discount
+        self.polyak_factor = polyak_factor
+        self.policy = DecayingEpsilonGreedy(
+            eps_decay,
+            eps_start,
+            eps_end,
+        )
 
         self.policy_net, self.target_net = (
             DQN(num_features, 1).to(self.device),
@@ -32,10 +34,12 @@ class DoubleDQN:
         for p in self.target_net.parameters():
             p.requires_grad = False
 
-        self.optimizer = optimizer_class(
-            self.policy_net.parameters(),
-            **optimizer_config
-        )
+    def parameters(self):
+        return self.policy_net.parameters()
+
+    def set_network(self, state_dict):
+        self.policy_net.load_state_dict(state_dict)
+        self.target_net.load_state_dict(state_dict)
 
     def to(self, device):
         self.device = device
@@ -54,48 +58,33 @@ class DoubleDQN:
             states.to(self.device)
         ).cpu().detach().numpy()
 
-    def optimize(self, experience_replay, num_updates=1):
+    def update_target_net(self, polyak_avg=False):
 
-        batch_loss = []
-        for _ in range(num_updates):
-            batch_loss.append(
-                self._optimize(experience_replay)
-            )
+        if polyak_avg:
+            with torch.no_grad():
+                for policy_param, target_param in zip(
+                        self.policy_net.parameters(),
+                        self.target_net.parameters()
+                ):
+                    target_param.data.mul_(self.polyak_factor)
+                    target_param.data.add_((1 - self.polyak_factor) * policy_param.data)
 
-        self.policy.update()
-        return sum(batch_loss) / len(batch_loss)
+                p_params = []
+                t_params = []
 
-    def _optimize(self, experience_replay):
+                for policy_param, target_param in zip(
+                        self.policy_net.parameters(),
+                        self.target_net.parameters()
+                ):
 
-        self.optimizer.zero_grad()
-        experience = experience_replay.sample(self.batch_size)
-        states_ = torch.stack([S for S, *_ in experience]).to(self.device)
+                    p_params.append(policy_param.flatten())
+                    t_params.append(target_param.flatten())
 
-        next_states_ = [S for *_, S, _ in experience]
+                p_params = torch.cat(p_params)
+                t_params = torch.cat(t_params)
 
-        q = self.policy_net(states_).reshape((1, self.batch_size))
+                print(f"Parameters distance: {F.l1_loss(p_params, t_params).item()}")
 
-        q_target = torch.stack([
-            self.target_net(S.to(self.device)).max(dim=0).values.detach()
-            for S in next_states_
-        ]).reshape((1, self.batch_size)).to(self.device)
+            return
 
-        rewards = torch.stack([
-            R for _, R, *_ in experience
-        ]).reshape((1, self.batch_size)).to(self.device)
-
-        is_terminal = torch.tensor([
-            T for *_, T in experience
-        ]).reshape((1, self.batch_size)).to(self.device)
-
-        q_target = rewards + self.discount * (1 - is_terminal) * q_target
-
-        loss = F.smooth_l1_loss(q, q_target, reduction="mean")
-
-        loss.backward()
-        self.optimizer.step()
-
-        return loss.item()
-
-    def update_target_net(self):
         self.target_net.load_state_dict(self.policy_net.state_dict())
