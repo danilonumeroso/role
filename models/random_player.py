@@ -4,6 +4,11 @@ import chess.engine
 
 class RandomPlayer:
 
+    def __init__(self):
+        self.id = {
+            'name': 'RandomPlayer'
+        }
+
     def play(self, board: chess.Board, limit=None) -> chess.engine.PlayResult:
 
         legal_moves = list(board.legal_moves)

@@ -1,136 +1,134 @@
 import torch
 import fire
-import chess
-import chess.pgn
+import ray
+import chess.engine
 
+from play import play, play_contender, get_next_states
 from utils import set_seed, create_path
-from utils.features import board_to_feature
-from models.role.agent import Agent
+from models.role.agent import DoubleDQN
 from pathlib import Path
 from datetime import datetime
+from models.role.replay_memory import ReplayMemory
+from models.random_player import RandomPlayer
+from models.role_player import Role
+from utils import to_json, s2c
 
 
-def main(num_episodes: int = 20000,
-         len_episode: int = 256,
-         lr: float = 1e-3,
-         momentum: float = 0.9,
-         polyak: float = 0.995,
-         gamma: float = 0.95,
+def main(seed: int = 0,
+         num_cpus=1,
+         num_gpus=1,
+         max_num_games: int = 20000,
+         max_moves: int = 256,
          discount: float = 0.9,
-         replay_buffer_size: int = 10000,
+         experience_replay_size: int = 2,
          batch_size: int = 256,
-         update_interval: int = 256,
+         update_target_interval: int = 10,
+         save_interval: int = 1000,
          num_updates: int = 5,
-         seed: int = 0,
-         save_dir: Path = Path('runs')):
-
-    print(update_interval)
-
-    save_dir = save_dir / datetime.now().isoformat()
-
-    create_path(save_dir)
+         expert_path: Path = Path('./stockfish'),
+         save_dir: Path = Path('./runs'),
+         optim: str = 'SGD',
+         **optim_config):
 
     set_seed(seed)
 
-    num_input = 384
-    num_output = 1
+    ray.init(num_cpus=num_cpus,
+             num_gpus=num_gpus,
+             include_dashboard=False)
 
-    device = torch.device("cuda")
-    agent = Agent(num_input, num_output, device, lr, momentum, replay_buffer_size)
+    save_dir = save_dir / datetime.now().isoformat()
+    create_path(save_dir)
+    create_path(save_dir / 'train_history')
 
-    eps = 0.05
-    batch_losses = []
-    episode = 0
-    it = 0
+    num_features = 384
+    experience_replay_size = experience_replay_size * max_moves * num_cpus
 
-    board = chess.Board()
-    game = chess.pgn.Game()
-    moves = []
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    expert = chess.engine.SimpleEngine.popen_uci("./stockfish")
-    expert.analyse(board, chess.engine.Limit(time=0.001))['score'].relative
-    white_reward = 0
-    black_reward = 0
-    og_len_episode = len_episode
+    optimizer_class = s2c(f"torch.optim.{optim}")
 
-    while episode < num_episodes:
+    experience_replay = ReplayMemory(experience_replay_size)
+    network = DoubleDQN(
+        device=device,
+        eps_decay=0.999,
+        num_features=num_features,
+        batch_size=batch_size,
+        discount=discount,
+        optimizer_class=optimizer_class,
+        **optim_config
+    )
 
-        if episode < 5000:
-            len_episode = 30
-        elif episode < 10000:
-            len_episode = 60
-        else:
-            len_episode - og_len_episode
+    losses = []
+    num_games = 0
 
-        states = []
-        rewards = []
+    residual = save_interval
 
-        legal_moves = list(board.legal_moves)
+    to_json(save_dir / 'configuration.json', {
+        'seed': seed,
+        'max_move': max_moves,
+        'discount': discount,
+        'experience_replay_size': experience_replay_size,
+        'batch_size': batch_size,
+        'num_updates': num_updates,
+        'optim': optim,
+        **optim_config,
 
-        for m in legal_moves:
-            color = board.turn
-            board.push(m)
-            states.append(
-                torch.as_tensor(board_to_feature(board)).float()
+    })
+
+    while num_games < max_num_games:
+
+        game_ids = []
+        network.to('cpu')
+        for _ in range(num_cpus):
+            game_ids.append(
+                play.remote(network,
+                            expert_path,
+                            max_moves=max_moves)
             )
-            reward = expert.analyse(board, chess.engine.Limit(time=0.001))['score'].pov(color)
 
-            reward = reward.score(mate_score=3000) / 100
-
-            rewards.append(reward - (white_reward if color else black_reward))
-            board.pop()
-
-        observations = torch.stack(states).float()
-
-        idx = agent.action_step(observations, eps)
-        action = legal_moves[idx]
-        reward = rewards[idx]
-
-        if color:
-            white_reward = reward
-        else:
-            black_reward = reward
-
-        board.push(action)
-        moves.append(action)
-        done = board.is_game_over() or it % len_episode == 0
-
-        agent.replay_buffer.push(
-            states[idx],
-            torch.as_tensor(reward).float(),
-            observations,
-            int(done)
-        )
-
-        if it % update_interval == 0 and len(agent.replay_buffer) >= batch_size:
-
-            errors = []
-            for _ in range(num_updates):
-                loss = agent.train_step(
-                    batch_size,
-                    gamma,
-                    polyak
+        for id_ in game_ids:
+            replay, history = ray.get(id_)
+            for experience in replay.memory:
+                experience_replay.push(
+                    *experience
                 )
-                errors.append(loss.item())
-                batch_losses.append(sum(errors) / len(errors))
 
-            print(f'episode: {episode}, loss:{batch_losses[-1]:.4f}')
+        to_json(save_dir / "train_history" / f"{num_games}.json", history)
 
-        it += 1
+        network.to(device)
 
-        if done:
+        residual -= num_cpus
+        num_games += num_cpus
 
-            game.add_line(moves)
-            with open(save_dir / f"game_ep{episode}.pgn", "w", encoding="utf-8") as f:
-                exporter = chess.pgn.FileExporter(f)
-                game.accept(exporter)
+        if len(experience_replay) >= batch_size:
+            loss = network.optimize(experience_replay, num_updates)
+            network.update_target_net()
+            losses.append(loss)
+            print(f'[{num_games}/{max_num_games}] loss: {loss:.4f}')
 
-            board = chess.Board()
-            game = chess.pgn.Game()
-            moves = []
-            episode += 1
+            to_json(save_dir / "loss.json", losses)
+            torch.save(network.policy_net.state_dict(),
+                       save_dir / f'model_{num_games}.pth')
 
-    expert.quit()
+        if residual <= 0:
+            residual = save_interval
+            old_eps = network.policy.eps
+            network.policy.eps = 0.0
+
+            role = Role(network, get_next_states)
+            for contender in [
+                    RandomPlayer(),
+                    Role(network, get_next_states),
+                    chess.engine.SimpleEngine.popen_uci(expert_path)
+            ]:
+                id = f"role-vs-{contender.id['name']}"
+                play_contender(role,
+                               contender,
+                               record_game=True,
+                               game_id=id,
+                               save_dir=save_dir)
+
+            network.policy.eps = old_eps
 
 
 if __name__ == '__main__':

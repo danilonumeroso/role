@@ -1,73 +1,101 @@
 import torch
-import numpy as np
+from torch.nn import functional as F
 from models.role.dqn import DQN
-from models.role.replay_memory import ReplayMemory
+from models.policy import DecayingEpsilonGreedy
 
 
-class Agent(object):
+class DoubleDQN:
     def __init__(self,
-                 num_input,
-                 num_output,
                  device,
-                 lr,
-                 momentum,
-                 replay_buffer_size):
+                 num_features,
+                 batch_size,
+                 discount,
+                 eps_decay,
+                 optimizer_class,
+                 **optimizer_config,
+                 ):
 
         self.device = device
-        self.num_input = num_input
-        self.num_output = num_output
+        self.num_input = num_features
+        self.policy = DecayingEpsilonGreedy(eps_decay)
+        self.batch_size = batch_size
+        self.discount = discount
 
-        self.dqn, self.target_dqn = (
-            DQN(num_input, num_output).to(self.device),
-            DQN(num_input, num_output).to(self.device)
+        self.policy_net, self.target_net = (
+            DQN(num_features, 1).to(self.device),
+            DQN(num_features, 1).to(self.device)
         )
 
-        for p in self.target_dqn.parameters():
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval()
+
+        for p in self.target_net.parameters():
             p.requires_grad = False
 
-        self.replay_buffer = ReplayMemory(replay_buffer_size)
-        self.optimizer = torch.optim.SGD(self.dqn.parameters(), lr=lr, momentum=momentum)
-        # self.optimizer = torch.optim.AdamW(
-        #     self.dqn.parameters(), lr=lr, weight_decay=1e-5
-        # )
+        self.optimizer = optimizer_class(
+            self.policy_net.parameters(),
+            **optimizer_config
+        )
 
-    def action_step(self, observations, epsilon_threshold):
-        if np.random.uniform() < epsilon_threshold:
-            action = np.random.randint(0, observations.shape[0])
-        else:
-            q_value = self.dqn.forward(observations.to(self.device))
-            action = torch.argmax(q_value).cpu().detach().numpy()
+    def to(self, device):
+        self.device = device
 
-        return action
+        self.policy_net, self.target_net = (
+            self.policy_net.to(device),
+            self.target_net.to(device)
+        )
 
-    def train_step(self, batch_size, gamma, polyak):
+    def set_deterministic(self):
+        self.policy.eps = 0
+
+    def take_action(self, states):
+        return self.policy.take(
+            self.policy_net,
+            states.to(self.device)
+        ).cpu().detach().numpy()
+
+    def optimize(self, experience_replay, num_updates=1):
+
+        batch_loss = []
+        for _ in range(num_updates):
+            batch_loss.append(
+                self._optimize(experience_replay)
+            )
+
+        self.policy.update()
+        return sum(batch_loss) / len(batch_loss)
+
+    def _optimize(self, experience_replay):
+
         self.optimizer.zero_grad()
-        experience = self.replay_buffer.sample(batch_size)
+        experience = experience_replay.sample(self.batch_size)
         states_ = torch.stack([S for S, *_ in experience]).to(self.device)
 
         next_states_ = [S for *_, S, _ in experience]
 
-        q = self.dqn(states_)
-        q_target = torch.stack([self.target_dqn(S.to(self.device)).max(dim=0).values.detach() for S in next_states_])
+        q = self.policy_net(states_).reshape((1, self.batch_size))
 
-        rewards = torch.stack([R for _, R, *_ in experience]).reshape((1, batch_size)).to(self.device)
-        dones = torch.tensor([D for *_, D in experience]).reshape((1, batch_size)).to(self.device)
+        q_target = torch.stack([
+            self.target_net(S.to(self.device)).max(dim=0).values.detach()
+            for S in next_states_
+        ]).reshape((1, self.batch_size)).to(self.device)
 
-        q_target = rewards + gamma * (1 - dones) * q_target
-        td_target = q - q_target
+        rewards = torch.stack([
+            R for _, R, *_ in experience
+        ]).reshape((1, self.batch_size)).to(self.device)
 
-        loss = torch.where(
-            torch.abs(td_target) < 1.0,
-            0.5 * td_target * td_target,
-            1.0 * (torch.abs(td_target) - 0.5),
-        ).mean()
+        is_terminal = torch.tensor([
+            T for *_, T in experience
+        ]).reshape((1, self.batch_size)).to(self.device)
+
+        q_target = rewards + self.discount * (1 - is_terminal) * q_target
+
+        loss = F.smooth_l1_loss(q, q_target, reduction="mean")
 
         loss.backward()
         self.optimizer.step()
 
-        with torch.no_grad():
-            for param, target_param in zip(self.dqn.parameters(), self.target_dqn.parameters()):
-                target_param.data.mul_(polyak)
-                target_param.data.add_((1 - polyak) * param.data)
+        return loss.item()
 
-        return loss
+    def update_target_net(self):
+        self.target_net.load_state_dict(self.policy_net.state_dict())

@@ -1,0 +1,11 @@
+{
+  "seed": 348,
+  "lr": 0.01,
+  "momentum": 0.9,
+  "optim": "SGD",
+  "max_move": 256,
+  "discount": 0.9,
+  "experience_replay_size": 1024,
+  "batch_size": 100,
+  "num_updates": 1
+}

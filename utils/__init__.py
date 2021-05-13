@@ -4,6 +4,7 @@ import torch
 import datetime
 import json
 from pathlib import Path
+from pydoc import locate
 
 
 def set_seed(seed):
@@ -34,3 +35,10 @@ def to_json(save_path, obj):
 def from_json(path):
     f = open(path, "r")
     return json.load(f)
+
+
+def s2c(class_name):
+    result = locate(class_name)
+    if result is None:
+        raise ImportError(f"The dotted path '{class_name}' is unknown.")
+    return result
