@@ -33,10 +33,12 @@ def get_reward(board,
                white_turn,
                previous_reward,
                time_per_move):
+
     r = expert.analyse(
         board,
         chess.engine.Limit(time=time_per_move)
     )['score'].pov(white_turn)
+
     r = r.score(mate_score=MATE_SCORE) / SCORE_REDUCTION
     r = r - previous_reward
 
@@ -92,6 +94,9 @@ def play(network,
             get_next_states(board=board)
         )
 
+        best_move = expert.play(board,
+                                chess.engine.Limit(time=time_per_move)).move
+
         move_idx, expert_move = move(board,
                                      legal_moves,
                                      next_states,
@@ -104,6 +109,8 @@ def play(network,
         board.push(m)
 
         if expert_move:
+            reward = 1.0
+        elif m == best_move:
             reward = 1.0
         else:
             reward = get_reward(board,

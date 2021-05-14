@@ -2,6 +2,7 @@ import torch
 import fire
 import ray
 import chess.engine
+import random
 
 from play import play, play_contender, get_next_states
 from utils import set_seed, create_path
@@ -13,10 +14,12 @@ from models.random_player import RandomPlayer
 from models.role_player import Role
 from utils import to_json, s2c
 from torch.nn import functional as F
+from torch.optim.lr_scheduler import MultiStepLR
 
 
 def optimize_network(network,
                      optimizer,
+                     scheduler,
                      experience_replay,
                      num_updates,
                      batch_size,
@@ -26,6 +29,7 @@ def optimize_network(network,
         batch_loss.append(
             _optimize(network,
                       optimizer,
+                      scheduler,
                       batch_size,
                       experience_replay,
                       discount)
@@ -36,6 +40,7 @@ def optimize_network(network,
 
 def _optimize(network,
               optimizer,
+              scheduler,
               batch_size,
               experience_replay,
               discount):
@@ -67,6 +72,7 @@ def _optimize(network,
 
     loss.backward()
     optimizer.step()
+    scheduler.step()
 
     return loss.item()
 
@@ -155,8 +161,7 @@ def main(seed: int = 0,
     num_games = 0
     target_update = 0
 
-    last_ids = [0] * test_with_last_n
-    position = 0
+    ids = []
 
     residual = save_interval
 
@@ -171,6 +176,11 @@ def main(seed: int = 0,
         **optim_config,
 
     })
+
+    scheduler = MultiStepLR(optimizer,
+                            milestones=[int(100e3), int(200e3)],
+                            gamma=0.1,
+                            verbose=True)
 
     while num_games < max_num_games:
 
@@ -204,6 +214,7 @@ def main(seed: int = 0,
         if len(experience_replay) >= batch_size:
             loss = optimize_network(network,
                                     optimizer,
+                                    scheduler,
                                     experience_replay,
                                     num_updates,
                                     batch_size,
@@ -220,22 +231,23 @@ def main(seed: int = 0,
             torch.save(network.policy_net.state_dict(),
                        save_dir / 'checkpoints' / f'model_{num_games}.pth')
 
-            last_ids[position] = num_games
-            position = (position + 1) % test_with_last_n
+            ids.append(num_games)
 
         if residual <= 0:
             residual = save_interval
             old_eps = network.policy.eps
-            network.policy.eps = 0.0
+            network.set_deterministic()
 
             role = Role(network, get_next_states)
+
+            contender_ids = [random.choice(ids) for _ in test_with_last_n]
 
             contenders = [
                 get_previous_network(id_,
                                      num_features,
                                      save_dir / 'checkpoints',
                                      network)
-                for id_ in last_ids
+                for id_ in contender_ids
             ]
 
             for contender in [
