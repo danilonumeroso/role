@@ -1,4 +1,5 @@
 import torch
+
 from models.role.dqn import DQN
 from models.policy import DecayingEpsilonGreedy
 from torch.nn import functional as F
@@ -51,6 +52,7 @@ class DoubleDQN:
 
     def set_deterministic(self):
         self.policy.eps = 0
+        self.policy.eps_end = 0
 
     def take_action(self, states):
         return self.policy.take(

@@ -1,5 +1,8 @@
 import random
-import numpy as np
+from collections import namedtuple
+
+Transitions = namedtuple('Transitions', ('state', 'action', 'state_next', 'reward'))
+
 
 class ReplayMemory:
 

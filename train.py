@@ -3,8 +3,15 @@ import fire
 import ray
 import chess.engine
 import random
+import haiku as hk
+import jax
+import jax.numpy as np
+import numpy as onp
+import optax
 
-from play import play, play_contender, get_next_states
+from jax import grad, vmap
+from models.role.policy_net import policy_fn
+from play import play, play_contender, get_next_states, get_previous_network
 from utils import set_seed, create_path
 from models.role.agent import DoubleDQN
 from pathlib import Path
@@ -13,6 +20,7 @@ from models.role.replay_memory import ReplayMemory
 from models.random_player import RandomPlayer
 from models.role_player import Role
 from utils import to_json, s2c
+from utils.moves import make_move
 from torch.nn import functional as F
 from torch.optim.lr_scheduler import MultiStepLR
 
@@ -51,7 +59,7 @@ def _optimize(network,
 
     next_states_ = [S for *_, S, _ in experience]
 
-    q = network.policy_net(states_).reshape((1, batch_size))
+    q_value = network.policy_net(states_).reshape((1, batch_size))
 
     q_target = torch.stack([
         network.target_net(S.to(network.device)).max(dim=0).values.detach()
@@ -66,44 +74,15 @@ def _optimize(network,
         T for *_, T in experience
     ]).reshape((1, batch_size)).to(network.device)
 
-    q_target = rewards + discount * (1 - is_terminal) * q_target
+    q_target = rewards + (1 - is_terminal) * discount * q_target
 
-    loss = F.smooth_l1_loss(q, q_target, reduction="mean")
+    loss = F.smooth_l1_loss(q_target, q_value, reduction="mean")
 
     loss.backward()
     optimizer.step()
     scheduler.step()
 
     return loss.item()
-
-
-def get_previous_network(id, num_features, checkpoint_dir, current_network):
-    try:
-        contender_network = DoubleDQN(
-            device='cpu',
-            eps_start=0.,
-            num_features=num_features,
-        )
-
-        contender_network.set_network(
-            torch.load(
-                checkpoint_dir / f"model_{id}.pth"
-            )
-        )
-
-        role_contender = Role(contender_network,
-                              get_next_states)
-
-        role_contender.id = {'name': f'ROLEv{id}'}
-
-        return role_contender
-    except FileNotFoundError:
-
-        role_contender = Role(current_network,
-                              get_next_states)
-        role_contender.id = {'name': 'ROLE='}
-
-    return role_contender
 
 
 def main(seed: int = 0,
@@ -140,22 +119,30 @@ def main(seed: int = 0,
     num_features = 384
     experience_replay_size = experience_replay_size * max_moves * num_workers
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    optimizer_class = s2c(f"torch.optim.{optim}")
+    # optimizer_class = s2c(f"torch.optim.{optim}")
 
-    experience_replay = ReplayMemory(experience_replay_size)
+    # experience_replay = ReplayMemory(experience_replay_size)
 
-    network = DoubleDQN(
-        device=device,
-        eps_decay=0.999,
-        num_features=num_features,
-    )
+    network = hk.without_apply_rng(hk.transform(policy_fn))
 
-    optimizer = optimizer_class(
-        network.parameters(),
-        **optim_config
-    )
+    tx = optax.sgd(**optim_config)
+
+    key = jax.random.PRNGKey(seed)
+    params = network.init(key, np.ones((384,)))
+    opt_state = tx.init(params)
+
+    # n2 = DoubleDQN(
+    #     device=device,
+    #     eps_decay=0.999,
+    #     num_features=num_features,
+    # )
+
+    # optimizer = optimizer_class(
+    #     n2.parameters(),
+    #     **optim_config
+    # )
 
     losses = []
     num_games = 0
@@ -177,61 +164,92 @@ def main(seed: int = 0,
 
     })
 
-    scheduler = MultiStepLR(optimizer,
-                            milestones=[int(100e3), int(200e3)],
-                            gamma=0.1,
-                            verbose=True)
+    def loss_fn(params, s, a, r):
+        logits, _ = network.apply(params, s)
+        log_prob = jax.nn.log_softmax(logits)
+        log_prob = jax.numpy.take_along_axis(log_prob,
+                                             a.reshape(log_prob.shape[0], 1), -1)
+
+        loss = (log_prob * r.sum()).sum()
+        decay = sum(p.sum() for p in jax.tree_leaves(params))
+        return loss + 1e-2 * decay
+
+    def train_step(params, opt_state, trajectories):
+
+        loss = []
+        for t in trajectories:
+            s = np.array(list(map(lambda t_: t_.state, t)))
+            a = np.array(list(map(lambda t_: t_.action, t)))
+            r = np.array(list(map(lambda t_: t_.reward, t)))
+
+            l, grads = jax.value_and_grad(loss_fn)(params, s, a, r)
+            loss.append(l)
+
+            updates, new_opt_state = tx.update(grads, opt_state, params)
+            new_params = optax.apply_updates(params, updates)
+
+        return new_params, new_opt_state, sum(loss) / len(loss)
 
     while num_games < max_num_games:
 
+        trajectories = []
         game_ids = []
-        network.to('cpu')
+        # network.to('cpu')
         for _ in range(num_workers):
             game_ids.append(
                 play.remote(network,
+                            params,
                             expert_path,
                             max_moves=max_moves)
             )
 
         for id_ in game_ids:
-            replay, history = ray.get(id_)
-            for experience in replay.memory:
-                experience_replay.push(
-                    *experience
-                )
+            # replay, history = ray.get(id_)
 
-        to_json(
-            save_dir / "train_history" / f"{num_games + num_workers}.json",
-            history
-        )
+            white, black = ray.get(id_)
+            trajectories.append(white)
+            trajectories.append(black)
+            # for experience in replay.memory:
+            #     experience_replay.push(
+            #         *experience
+            #     )
 
-        network.to(device)
+        # to_json(
+        #     save_dir / "train_history" / f"{num_games + num_workers}.json",
+        #     history
+        # )
+
+        # network.to(device)
 
         residual -= num_workers
         num_games += num_workers
         target_update += 1
 
-        if len(experience_replay) >= batch_size:
-            loss = optimize_network(network,
-                                    optimizer,
-                                    scheduler,
-                                    experience_replay,
-                                    num_updates,
-                                    batch_size,
-                                    discount)
-            network.policy.update()
-            if target_update >= target_update_interval:
-                target_update = 0
-                network.update_target_net(polyak_avg)
-            losses.append(loss)
-            print(f'[{num_games}/{max_num_games}] loss: {loss:.4f}')
+        params, opt_state, loss = train_step(params, opt_state, trajectories)
 
-            to_json(save_dir / "loss.json", losses)
+        losses.append(loss)
+        print(loss)
+        # if len(experience_replay) >= batch_size:
+        #     loss = optimize_network(network,
+        #                             optimizer,
+        #                             scheduler,
+        #                             experience_replay,
+        #                             num_updates,
+        #                             batch_size,
+        #                             discount)
+        #     network.policy.update()
+        #     if target_update >= target_update_interval:
+        #         target_update = 0
+        #         network.update_target_net(polyak_avg)
+        #     losses.append(loss)
+        #     print(f'[{num_games}/{max_num_games}] loss: {loss:.4f}')
 
-            torch.save(network.policy_net.state_dict(),
-                       save_dir / 'checkpoints' / f'model_{num_games}.pth')
+        #     to_json(save_dir / "loss.json", losses)
 
-            ids.append(num_games)
+        #     torch.save(network.policy_net.state_dict(),
+        #                save_dir / 'checkpoints' / f'model_{num_games}.pth')
+
+        #     ids.append(num_games)
 
         if residual <= 0:
             residual = save_interval
@@ -240,7 +258,7 @@ def main(seed: int = 0,
 
             role = Role(network, get_next_states)
 
-            contender_ids = [random.choice(ids) for _ in test_with_last_n]
+            contender_ids = [random.choice(ids) for _ in range(test_with_last_n)]
 
             contenders = [
                 get_previous_network(id_,
