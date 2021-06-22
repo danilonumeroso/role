@@ -15,15 +15,14 @@ class HumanPlayer:
         while True:
             try:
                 move = input("Move: ")
-                move = chess.Move.from_uci(move)
+                move = board.parse_san(move)
                 if move not in board.legal_moves:
-                    raise Exception("Aaaaaaaah")
+                    raise Exception("")
                 break
             except KeyboardInterrupt:
                 raise
-            except:
+            except Exception:
                 pass
-
 
         return chess.engine.PlayResult(move=move, ponder=None)
 

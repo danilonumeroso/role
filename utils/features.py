@@ -1,5 +1,76 @@
 import chess
 import numpy as np
+import torch
+
+
+def board_to_feat(board: chess.Board):
+    self_, opponent = board.turn, not board.turn
+
+    board_shape = (1, 8, 8)
+
+    N = 37
+
+    turn_plane = np.empty(board_shape)
+    turn_plane.fill(self_)
+
+    p1_kingside_castling = np.empty_like(turn_plane)
+    p1_queenside_castling = np.empty_like(turn_plane)
+
+    p2_kingside_castling = np.empty_like(turn_plane)
+    p2_queenside_castling = np.empty_like(turn_plane)
+
+    p1_kingside_castling.fill(board.has_kingside_castling_rights(self_))
+    p1_queenside_castling.fill(board.has_queenside_castling_rights(self_))
+
+    p2_kingside_castling.fill(board.has_kingside_castling_rights(opponent))
+    p2_queenside_castling.fill(board.has_queenside_castling_rights(opponent))
+
+    # stack first feature planes
+    feat = np.vstack((
+        turn_plane,
+        p1_kingside_castling,
+        p1_queenside_castling,
+        p2_kingside_castling,
+        p2_queenside_castling
+    ))
+
+    pieces = [chess.KING, chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT, chess.PAWN]
+
+    # own pieces
+
+    for piece in pieces:
+        positions = list(board.pieces(piece, self_))
+
+        if len(positions) == 0:
+            feat = np.zeros_like(turn_plane)
+
+        positions = [(p // 8, p % 8) for p in positions]
+
+        for x, y in positions:
+            plane = np.zeros_like(turn_plane)
+            plane[0, x, y] = 1.
+
+            feat = np.vstack((feat, plane))
+
+    # opponent's pieces
+    for piece in pieces:
+        positions = list(board.pieces(piece, opponent))
+        positions = [(p // 8, p % 8) for p in positions]
+
+        for x, y in positions:
+            plane = np.zeros_like(turn_plane)
+            plane[0, x, y] = 1.
+
+            feat = np.vstack((feat, plane))
+
+    N = N - feat.shape[0]
+    while N > 0:
+        N = N - 1
+        feat = np.vstack((feat, np.zeros_like(turn_plane)))
+    feat = torch.tensor(feat).float()
+
+    return feat
+
 
 def get_north_mobility(board, pos):
     pos_copy = int(pos)
