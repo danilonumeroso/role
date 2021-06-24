@@ -79,13 +79,9 @@ def get_reward(board,
 
     r = r.score(mate_score=MATE_SCORE) / SCORE_REDUCTION
     r = r - (premove_analysis.score(mate_score=MATE_SCORE) / SCORE_REDUCTION)
-
-    if r >= -0.1:
-        return 0.2
-
     r = min(CLAMP_VALUE, max(r, -CLAMP_VALUE))
 
-    range_ = (-1, 1)
+    range_ = (-1, 0)
 
     return normalize(r, x_min=-CLAMP_VALUE, x_max=CLAMP_VALUE, range_=range_)
 
