@@ -5,17 +5,22 @@ import chess.svg
 import ray
 import random
 import torch
+import jax
+
+import jax.numpy as np
 
 from models.role.replay_memory import ReplayMemory
-from models.role.agent import DoubleDQN
+# from models.role.agent import DoubleDQN
 from models.role_player import Role
 from utils.features import board_to_feature
 from utils.data import normalize
+from models.role.dqn import eps_greedy
 # from utils.moves import make_move, to_1d_index
 
 MATE_SCORE = 3000
 SCORE_REDUCTION = 100
 CLAMP_VALUE = 10
+TIME_PER_MOVE = 0.000001
 
 
 def get_next_states(board):
@@ -24,7 +29,7 @@ def get_next_states(board):
         board.push(move)
 
         next_states.append(
-            torch.as_tensor(board_to_feature(board)).float()
+            np.array(board_to_feature(board))
         )
 
         board.pop()
@@ -69,12 +74,11 @@ def get_previous_network(id,
 def get_reward(board,
                expert,
                white_turn,
-               premove_analysis,
-               time_per_move):
+               premove_analysis):
 
     r = expert.analyse(
         board,
-        chess.engine.Limit(time=time_per_move)
+        chess.engine.Limit(time=TIME_PER_MOVE)
     )['score'].pov(white_turn)
 
     r = r.score(mate_score=MATE_SCORE) / SCORE_REDUCTION
@@ -90,13 +94,13 @@ def move(board,
          legal_moves,
          next_states,
          network,
+         params,
          expert,
-         expert_ratio,
-         time_per_move):
+         expert_ratio):
     expert_move = random.uniform(0, 1) <= expert_ratio
 
     if expert_move:
-        move = expert.play(board, chess.engine.Limit(time=time_per_move)).move
+        move = expert.play(board, chess.engine.Limit(time=TIME_PER_MOVE)).move
         return legal_moves.index(move), expert_move
     else:
         move_idx = network.take_action(next_states)
@@ -105,13 +109,12 @@ def move(board,
 
 @ray.remote(num_cpus=1, num_gpus=0)
 def play(network,
+         params,
+         rng,
+         epsilon,
          expert_path,
          expert_ratio=.1,
-         time_per_move=0.001,
-         max_moves=256,
-         record_game=False,
-         game_id=None,
-         save_dir=None):
+         max_moves=256,):
 
     expert = chess.engine.SimpleEngine.popen_uci(expert_path)
 
@@ -124,27 +127,26 @@ def play(network,
         legal_moves = list(board.legal_moves)
         premove_analysis = expert.analyse(
             board,
-            chess.engine.Limit(time=time_per_move)
+            chess.engine.Limit(time=TIME_PER_MOVE)
         )['score'].pov(white_turn)
 
-        next_states = torch.stack(
+        next_states = np.stack(
             get_next_states(board=board)
         )
 
-        move_idx, expert_move = move(board,
-                                     legal_moves,
-                                     next_states,
-                                     network,
-                                     expert,
-                                     expert_ratio,
-                                     time_per_move)
+        expert_move = jax.random.uniform(next(rng)) < expert_ratio
 
-        m = legal_moves[move_idx]
+        if expert_move:
+            m = expert.play(board, chess.engine.Limit(time=TIME_PER_MOVE)).move
+        else:
+            move_idx, _ = eps_greedy(rng, network, params, next_states, epsilon)
+            m = legal_moves[move_idx]
+
         board.push(m)
 
         score = expert.analyse(
             board,
-            chess.engine.Limit(time=time_per_move)
+            chess.engine.Limit(time=TIME_PER_MOVE)
         )['score'].pov(white_turn)
 
         if expert_move:  # or m == best_move:
@@ -153,8 +155,7 @@ def play(network,
             reward = get_reward(board,
                                 expert,
                                 white_turn,
-                                premove_analysis,
-                                time_per_move=time_per_move)
+                                premove_analysis)
 
         assert reward >= -1 and reward <= 1
 
@@ -162,7 +163,7 @@ def play(network,
 
         replay_memory.push(
             next_states[move_idx],
-            torch.as_tensor(reward).float(),
+            np.array(reward),
             next_states,
             int(is_terminal)
         )

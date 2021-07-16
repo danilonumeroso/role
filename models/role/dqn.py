@@ -1,33 +1,83 @@
-import torch
-from torch.nn import functional as F
+import haiku as hk
+import optax
+import jax
+import jax.numpy as np
+from jax.nn import relu
+from functools import partial
 
 
-class DQN(torch.nn.Module):
-    def __init__(
-            self,
-            num_input,
-            num_output
-    ):
-        super(DQN, self).__init__()
-        self.layers = torch.nn.ModuleList([])
+def policy_fn(x):
+    net = hk.nets.MLP(
+        output_sizes=[1024, 512, 128],
+        activation=relu
+    )
 
-        hs = [1024, 512, 128, 32]
+    q_head = hk.Linear(1)
 
-        N = len(hs)
+    h = net(x)
+    return q_head(h)
 
-        for i in range(N - 1):
-            h, h_next = hs[i], hs[i+1]
-            dim_input = num_input if i == 0 else h
 
-            self.layers.append(
-                torch.nn.Linear(dim_input, h_next)
-            )
-        self.out = torch.nn.Linear(hs[-1], num_output)
+def train_fns(network,
+              opt,
+              batch_size,
+              discount):
 
-    def forward(self, x):
-        for layer in self.layers:
-            x = F.relu(layer(x))
+    loss_fn = partial(_loss_fn, network, discount)
+    optimize = partial(_optimize,
+                       opt,
+                       batch_size,
+                       loss_fn)
 
-        x = self.out(x)
+    return loss_fn, optimize
 
-        return x
+
+def _loss_fn(network, discount, w_policy, w_target, x):
+    s, r, s_next, is_terminal = x
+    q_value = network.apply(w_policy, s)
+    q_target = network.apply(w_target, s_next)
+
+    q_target = r * (1 - is_terminal) * discount * q_target
+
+    return q_value.mean() + q_target.mean()
+
+
+def _optimize(opt,
+              batch_size,
+              loss_fn,
+              experience_replay,
+              w_policy,
+              w_target,
+              opt_state):
+
+    experience = experience_replay.sample(batch_size)
+
+    states = np.stack([S for S, *_ in experience])
+    next_states = [S for *_, S, _ in experience]
+    rewards = np.stack([
+        R for _, R, *_ in experience
+    ])
+    is_terminal = np.array([
+        T for *_, T in experience
+    ])
+
+    loss, grads = jax.value_and_grad(loss_fn)(w_policy, w_target, (states, rewards, next_states, is_terminal))
+
+    updates, new_opt_state = opt.update(grads, opt_state, w_policy)
+    new_params = optax.apply_updates(w_policy, updates)
+
+    return new_params, new_opt_state, loss
+
+
+def update_target_net(q_params, t_params, alpha=0.99):
+    return optax.incremental_update(q_params, t_params, alpha)
+
+
+def eps_greedy(rng, network, params, x, eps):
+    is_random_action = jax.random.uniform(next(rng)) < eps
+
+    if is_random_action:
+        range_ = np.array(range(x.shape[0]))
+        return jax.random.choice(next(rng), range_), is_random_action
+    else:
+        return network.apply(params, x).argmax(), is_random_action

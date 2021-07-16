@@ -5,8 +5,6 @@ import datetime
 import json
 from pathlib import Path
 from pydoc import locate
-from models.role.agent import DoubleDQN
-from models.role_player import Role
 
 
 def set_seed(seed):
