@@ -34,12 +34,16 @@ def train_fns(network,
 
 def _loss_fn(network, discount, w_policy, w_target, x):
     s, r, s_next, is_terminal = x
+
     q_value = network.apply(w_policy, s)
-    q_target = network.apply(w_target, s_next)
+    q_target = np.stack([
+        network.apply(w_target, s).max(0)
+        for s in s_next
+    ])
 
     q_target = r * (1 - is_terminal) * discount * q_target
 
-    return q_value.mean() + q_target.mean()
+    return optax.huber_loss(q_value, q_target).mean()
 
 
 def _optimize(opt,
@@ -54,12 +58,14 @@ def _optimize(opt,
 
     states = np.stack([S for S, *_ in experience])
     next_states = [S for *_, S, _ in experience]
-    rewards = np.stack([
+
+    rewards = np.array([
         R for _, R, *_ in experience
-    ])
+    ]).reshape(-1, 1)
+
     is_terminal = np.array([
         T for *_, T in experience
-    ])
+    ]).reshape(-1, 1)
 
     loss, grads = jax.value_and_grad(loss_fn)(w_policy, w_target, (states, rewards, next_states, is_terminal))
 

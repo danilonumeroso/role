@@ -25,6 +25,7 @@ TIME_PER_MOVE = 0.000001
 
 def get_next_states(board):
     next_states = []
+
     for move in board.legal_moves:
         board.push(move)
 
@@ -33,6 +34,8 @@ def get_next_states(board):
         )
 
         board.pop()
+
+    next_states = np.array(next_states)
 
     return next_states
 
@@ -90,23 +93,6 @@ def get_reward(board,
     return normalize(r, x_min=-CLAMP_VALUE, x_max=CLAMP_VALUE, range_=range_)
 
 
-def move(board,
-         legal_moves,
-         next_states,
-         network,
-         params,
-         expert,
-         expert_ratio):
-    expert_move = random.uniform(0, 1) <= expert_ratio
-
-    if expert_move:
-        move = expert.play(board, chess.engine.Limit(time=TIME_PER_MOVE)).move
-        return legal_moves.index(move), expert_move
-    else:
-        move_idx = network.take_action(next_states)
-        return move_idx, expert_move
-
-
 @ray.remote(num_cpus=1, num_gpus=0)
 def play(network,
          params,
@@ -124,7 +110,10 @@ def play(network,
 
     for i in range(max_moves):
         white_turn = board.turn
+
         legal_moves = list(board.legal_moves)
+        num_legal_moves = len(legal_moves)
+
         premove_analysis = expert.analyse(
             board,
             chess.engine.Limit(time=TIME_PER_MOVE)
@@ -160,6 +149,11 @@ def play(network,
         assert reward >= -1 and reward <= 1
 
         is_terminal = board.is_game_over()
+
+        # assert num_legal_moves <= 64
+        # n_pad = 64 - num_legal_moves
+        # next_states = np.pad(next_states, ((0, n_pad), (0, 0)))
+        # mask_next_states = np.array([True] * num_legal_moves + [False] * n_pad)
 
         replay_memory.push(
             next_states[move_idx],
