@@ -19,6 +19,7 @@ class ReplayMemory:
         self.position = (self.position + 1) % self.capacity
 
     def sample(self, batch_size):
+        assert len(self.memory) >= batch_size, f"c: {self.capacity}, p: {self.position}, bs: {batch_size}"
         return random.sample(self.memory, batch_size)
 
     def __len__(self):

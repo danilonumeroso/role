@@ -1,27 +1,30 @@
 import chess
 import chess.engine
-import torch
+import jax.numpy as np
 
 
 class Role:
 
     def __init__(self,
                  network,
-                 get_next_states):
+                 params,
+                 get_next_states,
+                 id="Role"):
         self.id = {
-            'name': 'Role'
+            'name': id
         }
         self.network = network
+        self.params = params
         self.get_next_states = get_next_states
 
     def play(self, board: chess.Board, limit=None) -> chess.engine.PlayResult:
 
         legal_moves = list(board.legal_moves)
-        next_states = torch.stack(
+        next_states = np.stack(
             self.get_next_states(board=board)
         )
 
-        move_idx = self.network.take_action(next_states)
+        move_idx = self.network.apply(self.params, next_states).argmax()
 
         return chess.engine.PlayResult(move=legal_moves[move_idx],
                                        ponder=None)

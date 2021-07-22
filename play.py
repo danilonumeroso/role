@@ -4,23 +4,19 @@ import chess.engine
 import chess.svg
 import ray
 import random
-import torch
 import jax
 
 import jax.numpy as np
 
 from models.role.replay_memory import ReplayMemory
-# from models.role.agent import DoubleDQN
-from models.role_player import Role
 from utils.features import board_to_feature
 from utils.data import normalize
 from models.role.dqn import eps_greedy
-# from utils.moves import make_move, to_1d_index
 
 MATE_SCORE = 3000
 SCORE_REDUCTION = 100
 CLAMP_VALUE = 10
-TIME_PER_MOVE = 0.000001
+TIME_PER_MOVE = 1e-9
 
 
 def get_next_states(board):
@@ -38,40 +34,6 @@ def get_next_states(board):
     next_states = np.array(next_states)
 
     return next_states
-
-
-def get_previous_network(id,
-                         num_features,
-                         checkpoint_dir,
-                         current_network,
-                         device=torch.device('cpu')):
-    try:
-        contender_network = DoubleDQN(
-            device='cpu',
-            eps_start=0.,
-            num_features=num_features,
-        )
-
-        contender_network.set_network(
-            torch.load(
-                checkpoint_dir / f"model_{id}.pth",
-                map_location=device
-            )
-        )
-
-        role_contender = Role(contender_network,
-                              get_next_states)
-
-        role_contender.id = {'name': f'ROLEv{id}'}
-
-        return role_contender
-    except FileNotFoundError:
-
-        role_contender = Role(current_network,
-                              get_next_states)
-        role_contender.id = {'name': 'ROLE='}
-
-    return role_contender
 
 
 def get_reward(board,
@@ -112,7 +74,6 @@ def play(network,
         white_turn = board.turn
 
         legal_moves = list(board.legal_moves)
-        num_legal_moves = len(legal_moves)
 
         premove_analysis = expert.analyse(
             board,
@@ -139,21 +100,14 @@ def play(network,
         )['score'].pov(white_turn)
 
         if expert_move:  # or m == best_move:
-            reward = 1.0 if score.is_mate() else 0.5
+            reward = 2.0 if score.is_mate() else 1.0
         else:
             reward = get_reward(board,
                                 expert,
                                 white_turn,
                                 premove_analysis)
 
-        assert reward >= -1 and reward <= 1
-
         is_terminal = board.is_game_over()
-
-        # assert num_legal_moves <= 64
-        # n_pad = 64 - num_legal_moves
-        # next_states = np.pad(next_states, ((0, n_pad), (0, 0)))
-        # mask_next_states = np.array([True] * num_legal_moves + [False] * n_pad)
 
         replay_memory.push(
             next_states[move_idx],
@@ -162,7 +116,7 @@ def play(network,
             int(is_terminal)
         )
 
-        if board.is_game_over():
+        if is_terminal:
             break
 
     expert.quit()

@@ -5,6 +5,7 @@ import datetime
 import json
 from pathlib import Path
 from pydoc import locate
+from typing import Union
 
 
 def set_seed(seed):
@@ -42,3 +43,13 @@ def s2c(class_name):
     if result is None:
         raise ImportError(f"The dotted path '{class_name}' is unknown.")
     return result
+
+
+def dump(obj, path: Union[Path, str]):
+    import dill
+    dill.dump(obj, open(path, "wb"))
+
+
+def load(path: Union[Path, str]):
+    import dill
+    return dill.load(open(path, "rb"))

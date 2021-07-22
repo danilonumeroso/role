@@ -1,83 +1,22 @@
-import torch
 import fire
 import ray
 import chess.engine
 import random
 import haiku as hk
 import jax.numpy as np
-# import numpy as onp
 import optax
 
-# from jax import grad, vmap
 from models.role.dqn import policy_fn, train_fns, update_target_net
-from play import play, play_contender, get_next_states, get_previous_network
-from utils import set_seed, create_path
-# from models.role.agent import DoubleDQN
+from play import play, play_contender, get_next_states
+from utils import set_seed, create_path, dump, load
 from pathlib import Path
 from datetime import datetime
 from models.role.replay_memory import ReplayMemory
 from models.random_player import RandomPlayer
 from models.role_player import Role
 from haiku.data_structures import to_immutable_dict as hk_clone
-from utils import to_json, s2c
-# from utils.moves import make_move
-# from torch.nn import functional as F
+from utils import to_json
 
-
-# def optimize_network(network,
-#                      optimizer,
-#                      experience_replay,
-#                      num_updates,
-#                      batch_size,
-#                      discount):
-#     batch_loss = []
-#     for _ in range(num_updates):
-#         batch_loss.append(
-#             _optimize(network,
-#                       optimizer,
-#                       batch_size,
-#                       experience_replay,
-#                       discount)
-#         )
-
-#     return sum(batch_loss) / len(batch_loss)
-
-
-# def _optimize(network,
-#               optimizer,
-#               batch_size,
-#               experience_replay,
-#               discount):
-
-#     optimizer.zero_grad()
-#     experience = experience_replay.sample(batch_size)
-#     states_ = torch.stack([S for S, *_ in experience]).to(network.device)
-
-#     next_states_ = [S for *_, S, _ in experience]
-
-#     q_value = network.policy_net(states_).reshape((1, batch_size))
-
-#     q_target = torch.stack([
-#         network.target_net(S.to(network.device)).max(dim=0).values.detach()
-#         for S in next_states_
-#     ]).reshape((1, batch_size)).to(network.device)
-
-#     rewards = torch.stack([
-#         R for _, R, *_ in experience
-#     ]).reshape((1, batch_size)).to(network.device)
-
-#     is_terminal = torch.tensor([
-#         T for *_, T in experience
-#     ]).reshape((1, batch_size)).to(network.device)
-
-#     q_target = rewards + (1 - is_terminal) * discount * q_target
-
-#     loss = F.smooth_l1_loss(q_target, q_value, reduction="mean")
-
-#     loss.backward()
-#     optimizer.step()
-
-#     return loss.item()
 
 def optimize_net(optimize,
                  loss_fn,
@@ -100,8 +39,8 @@ def optimize_net(optimize,
 
 
 def main(seed: int = 0,
-         num_workers=1,
-         num_gpus=1,
+         num_workers: int = 1,
+         num_gpus: int = 1,
          max_num_games: int = 20000,
          max_moves: int = 256,
          discount: float = 0.9,
@@ -114,7 +53,7 @@ def main(seed: int = 0,
          save_dir: Path = Path('./runs'),
          optim: str = 'SGD',
          polyak_avg: bool = False,
-         test_with_last_n: int = 3,
+         num_contenders: int = 3,
          **optim_config):
 
     set_seed(seed)
@@ -123,7 +62,7 @@ def main(seed: int = 0,
              num_gpus=num_gpus,
              include_dashboard=False)
 
-    save_dir = save_dir / datetime.now().isoformat()
+    save_dir = save_dir / datetime.utcnow().isoformat()[:-7]
     create_path(save_dir)
     create_path(save_dir / 'train_history')
     create_path(save_dir / 'checkpoints')
@@ -201,49 +140,45 @@ def main(seed: int = 0,
                                                    opt_state)
 
             update_target_net(w_policy, w_target)
-
             eps = eps * eps_decay
-
             losses.append(loss)
+
             print(f'[{num_games}/{max_num_games}] loss: {loss:.4f}')
-
-            to_json(save_dir / "loss.json", losses)
-
-            torch.save(network.policy_net.state_dict(),
-                       save_dir / 'checkpoints' / f'model_{num_games}.pth')
+            np.save(f"{save_dir}/loss", losses)
+            dump(w_policy, save_dir / 'checkpoints' / f'model_{num_games}.ckpt')
 
             ids.append(num_games)
 
-        # if residual <= 0:
-        #     residual = save_interval
-        #     old_eps = network.policy.eps
-        #     network.set_deterministic()
+        if residual <= 0:
+            residual = save_interval
 
-        #     role = Role(network, get_next_states)
+            role = Role(network,
+                        w_policy,
+                        get_next_states,
+                        id=f"Role {num_games}")
+            try:
+                contenders = [
+                    Role(network,
+                         load(save_dir / 'checkpoints' / f'model_{id_}.ckpt'),
+                         get_next_states,
+                         id=f"Role {id_}")
+                    for id_ in [random.choice(ids) for _ in range(num_contenders)]
+                ]
+            except FileNotFoundError:
+                contenders = [role]
+                pass
 
-        #     contender_ids = [random.choice(ids) for _ in range(test_with_last_n)]
-
-        #     contenders = [
-        #         get_previous_network(id_,
-        #                              num_features,
-        #                              save_dir / 'checkpoints',
-        #                              network)
-        #         for id_ in contender_ids
-        #     ]
-
-        #     for contender in [
-        #             RandomPlayer(),
-        #             *contenders,
-        #             chess.engine.SimpleEngine.popen_uci(expert_path)
-        #     ]:
-        #         id = f"ROLEv{num_games}-vs-{contender.id['name']}"
-        #         play_contender(role,
-        #                        contender,
-        #                        record_game=True,
-        #                        game_id=id,
-        #                        save_dir=save_dir / 'games')
-
-        #     network.policy.eps = old_eps
+            for contender in [
+                    RandomPlayer(),
+                    *contenders,
+                    chess.engine.SimpleEngine.popen_uci(expert_path)
+            ]:
+                id = f"ROLEv{num_games}-vs-{contender.id['name']}"
+                play_contender(role,
+                               contender,
+                               record_game=True,
+                               game_id=id,
+                               save_dir=save_dir / 'games')
 
 
 if __name__ == '__main__':

@@ -42,7 +42,6 @@ def _loss_fn(network, discount, w_policy, w_target, x):
     ])
 
     q_target = r * (1 - is_terminal) * discount * q_target
-
     return optax.huber_loss(q_value, q_target).mean()
 
 
