@@ -88,6 +88,8 @@ def play(network,
 
         if expert_move:
             m = expert.play(board, chess.engine.Limit(time=TIME_PER_MOVE)).move
+            move_idx = legal_moves.index(m)
+            assert move_idx >= 0
         else:
             move_idx, _ = eps_greedy(rng, network, params, next_states, epsilon)
             m = legal_moves[move_idx]

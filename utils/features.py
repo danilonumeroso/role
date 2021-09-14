@@ -1,6 +1,6 @@
 import chess
 import numpy as np
-import torch
+# import torch
 
 
 def board_to_feat(board: chess.Board):

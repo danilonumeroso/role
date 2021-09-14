@@ -134,7 +134,7 @@ def main(seed: int = 0,
             params, opt_state, loss = optimize_net(optimize,
                                                    loss_fn,
                                                    num_updates,
-                                                   replay,
+                                                   experience_replay,
                                                    w_policy,
                                                    w_target,
                                                    opt_state)
