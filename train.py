@@ -3,14 +3,6 @@ import fire
 import ray
 import chess.engine
 import random
-# import haiku as hk
-# import jax
-# import jax.numpy as np
-# import numpy as onp
-# import optax
-
-# from jax import grad, vmap
-# from models.role.policy_net import policy_fn
 from play import play, play_contender, get_next_states, get_previous_network
 from utils import set_seed, create_path
 from models.role.agent import DoubleDQN
@@ -20,7 +12,6 @@ from models.role.replay_memory import ReplayMemory
 from models.random_player import RandomPlayer
 from models.role_player import Role
 from utils import to_json, s2c
-# from utils.moves import make_move
 from torch.nn import functional as F
 
 
