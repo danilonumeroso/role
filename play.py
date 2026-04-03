@@ -47,7 +47,8 @@ def get_previous_network(id,
         contender_network.set_network(
             torch.load(
                 checkpoint_dir / f"model_{id}.pth",
-                map_location=device
+                map_location=device,
+                weights_only=False,
             )
         )
 

@@ -88,6 +88,7 @@ def main(seed: int = 0,
          optim: str = 'SGD',
          polyak_avg: bool = False,
          test_with_last_n: int = 3,
+         search_depth: int = 0,
          **optim_config):
 
     set_seed(seed)
@@ -201,7 +202,7 @@ def main(seed: int = 0,
             old_eps = network.policy.eps
             network.set_deterministic()
 
-            role = Role(network, get_next_states)
+            role = Role(network, get_next_states, depth=search_depth)
 
             contender_ids = [random.choice(ids) for _ in range(test_with_last_n)]
 
